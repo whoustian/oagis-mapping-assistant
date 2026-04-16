@@ -559,3 +559,53 @@ button.danger:hover {
   border-color: var(--danger);
   color: var(--danger);
 }
+
+/* ============ Batch Map: spreadsheet upload preview ============ */
+/* Reuse the look of the Library preview table for the Batch Map preview. */
+.scroll-x {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+table.preview-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  width: 100%;
+}
+table.preview-table th,
+table.preview-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+table.preview-table th {
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-weight: 500;
+  position: sticky;
+  top: 0;
+}
+
+.file-label input[type='file'] {
+  display: block;
+  padding: 8px 0;
+}
+
+details.pipe-fallback {
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+details.pipe-fallback > summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: disclosure-closed;
+}
+details.pipe-fallback[open] > summary {
+  list-style: disclosure-open;
+  margin-bottom: 6px;
+}
