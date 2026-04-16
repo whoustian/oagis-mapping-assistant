@@ -51,6 +51,12 @@ META_DB = DATA_DIR / "meta.sqlite"
 STATIC_DIR = BASE_DIR / "static"
 TEAM_CONVENTIONS_PATH = BASE_DIR / "team_conventions.md"
 
+# Pseudo-upload used to hold canonical OAGIS schema entries seeded from an XSD.
+# Lives alongside user uploads in the same uploads table so it can be listed
+# and deleted from the library UI like any other source.
+CANONICAL_UPLOAD_ID = "oagis_canonical"
+CANONICAL_SOURCE_FILE = "OAGIS canonical schema"
+
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 COLLECTION_NAME = "oagis_mappings"
 DEFAULT_LLM_MODEL = "claude-4-5-sonnet-latest"
@@ -166,6 +172,10 @@ def build_document(row: dict, columns: dict) -> tuple[str, dict]:
         "description": desc,
         "notes": notes,
         "context": context,
+        # 'mapping' = a prior team mapping from an uploaded spreadsheet.
+        # 'canonical' = a path seeded from the OAGIS XSD — a valid location
+        # in the standard, not a precedent.
+        "kind": "mapping",
     }
     return doc, meta
 
@@ -277,9 +287,17 @@ def root():
 
 @app.get("/api/health")
 def health():
+    total = collection.count()
+    try:
+        canonical = collection.get(where={"kind": "canonical"}, include=[])
+        canonical_count = len(canonical.get("ids", []))
+    except Exception:
+        canonical_count = 0
     return {
         "status": "ok",
-        "mappings_indexed": collection.count(),
+        "mappings_indexed": max(total - canonical_count, 0),
+        "canonical_indexed": canonical_count,
+        "total_indexed": total,
         "embedding_model": EMBED_MODEL_NAME,
         "llm_model": DEFAULT_LLM_MODEL,
     }
@@ -291,7 +309,21 @@ def list_uploads():
         rows = conn.execute(
             "SELECT id, filename, sheet_name, row_count, created_at FROM uploads ORDER BY created_at DESC"
         ).fetchall()
-    return {"uploads": [dict(r) for r in rows], "total_indexed": collection.count()}
+    uploads = []
+    canonical_count = 0
+    for r in rows:
+        d = dict(r)
+        if d["id"] == CANONICAL_UPLOAD_ID:
+            d["kind"] = "canonical"
+            canonical_count = d["row_count"]
+        else:
+            d["kind"] = "mapping"
+        uploads.append(d)
+    return {
+        "uploads": uploads,
+        "total_indexed": collection.count(),
+        "canonical_indexed": canonical_count,
+    }
 
 
 @app.delete("/api/uploads/{upload_id}")
@@ -513,6 +545,152 @@ def upload_commit(req: CommitRequest):
 
 
 # ---------------------------------------------------------------------------
+# Canonical OAGIS schema seeding
+# ---------------------------------------------------------------------------
+class CanonicalRow(BaseModel):
+    oagis_path: str
+    source_attribute: Optional[str] = ""
+    description: Optional[str] = ""
+    data_type: Optional[str] = ""
+    context: Optional[str] = ""
+    notes: Optional[str] = ""
+
+
+class SeedCanonicalRequest(BaseModel):
+    rows: list[CanonicalRow]
+    # If true (default), wipe any existing canonical entries before seeding so
+    # re-running the seeder doesn't leave stale paths in the index.
+    replace_existing: bool = True
+
+
+@app.post("/api/seed/canonical")
+def seed_canonical(req: SeedCanonicalRequest):
+    """Bulk-load canonical OAGIS paths (e.g. from scripts/seed_oagis_xsd.py).
+
+    Paths are upserted into the same Chroma collection as user mappings but
+    tagged with kind='canonical' so retrieval/prompting can distinguish them.
+    They share a single pseudo-upload (CANONICAL_UPLOAD_ID) so the library UI
+    can show/delete them as a unit.
+    """
+    if not req.rows:
+        raise HTTPException(400, "provide at least one canonical row")
+
+    # Optional clean slate so re-running the seeder replaces rather than piles on.
+    if req.replace_existing:
+        try:
+            collection.delete(where={"upload_id": CANONICAL_UPLOAD_ID})
+        except Exception as e:  # pragma: no cover - non-fatal
+            log.warning("Could not clear prior canonical entries: %s", e)
+        with db() as conn:
+            conn.execute("DELETE FROM uploads WHERE id = ?", (CANONICAL_UPLOAD_ID,))
+
+    seen: dict[str, int] = {}
+    ids: list[str] = []
+    docs: list[str] = []
+    metas: list[dict] = []
+    duplicates = 0
+
+    for r in req.rows:
+        path = (r.oagis_path or "").strip()
+        if not path:
+            continue
+        el_name = (r.source_attribute or path.rsplit("/", 1)[-1] or "").strip()
+        dtype = (r.data_type or "").strip()
+        desc = (r.description or "").strip()
+        context = (r.context or "OAGIS canonical schema").strip()
+        notes = (r.notes or "Canonical OAGIS schema entry (not a prior mapping).").strip()
+
+        parts = [f"OAGIS Path: {path}"]
+        if el_name:
+            parts.append(f"Element: {el_name}")
+        if dtype:
+            parts.append(f"XSD Type: {dtype}")
+        if desc:
+            parts.append(f"Documentation: {desc}")
+        doc = " | ".join(parts)
+
+        meta = {
+            "source_attribute": el_name,
+            "oagis_path": path,
+            "data_type": dtype,
+            "description": desc,
+            "notes": notes,
+            "context": context,
+            "kind": "canonical",
+            "upload_id": CANONICAL_UPLOAD_ID,
+            "source_file": CANONICAL_SOURCE_FILE,
+        }
+
+        # Canonical IDs are deterministic on path only — each path is unique.
+        h = "c" + hashlib.sha1(path.encode()).hexdigest()[:15]
+        if h in seen:
+            idx = seen[h]
+            docs[idx] = doc
+            metas[idx] = meta
+            duplicates += 1
+            continue
+        seen[h] = len(ids)
+        ids.append(h)
+        docs.append(doc)
+        metas.append(meta)
+
+    if not docs:
+        raise HTTPException(400, "no valid canonical rows (every row had an empty oagis_path)")
+
+    log.info("Embedding %d canonical OAGIS paths...", len(docs))
+    t0 = time.time()
+    embeddings = embedder.encode(docs, batch_size=64, show_progress_bar=False).tolist()
+    log.info("Embedded canonical schema in %.2fs", time.time() - t0)
+
+    CHUNK = 500
+    failed_rows = 0
+    for i in range(0, len(docs), CHUNK):
+        try:
+            collection.upsert(
+                ids=ids[i : i + CHUNK],
+                documents=docs[i : i + CHUNK],
+                metadatas=metas[i : i + CHUNK],
+                embeddings=embeddings[i : i + CHUNK],
+            )
+        except Exception as chunk_err:
+            log.warning("Canonical chunk failed (%s) — retrying row-by-row", chunk_err)
+            for j in range(len(ids[i : i + CHUNK])):
+                k = i + j
+                try:
+                    collection.upsert(
+                        ids=[ids[k]],
+                        documents=[docs[k]],
+                        metadatas=[metas[k]],
+                        embeddings=[embeddings[k]],
+                    )
+                except Exception as row_err:
+                    failed_rows += 1
+                    log.error("Skipping canonical path %s: %s", metas[k]["oagis_path"], row_err)
+
+    indexed = len(docs) - failed_rows
+    with db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO uploads (id, filename, sheet_name, row_count, columns_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                CANONICAL_UPLOAD_ID,
+                CANONICAL_SOURCE_FILE,
+                None,
+                indexed,
+                json.dumps({"kind": "canonical"}),
+                time.time(),
+            ),
+        )
+
+    return {
+        "ok": True,
+        "indexed": indexed,
+        "collapsed_duplicates": duplicates,
+        "failed_rows": failed_rows,
+        "total_in_index": collection.count(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Retrieval + LLM recommendation
 # ---------------------------------------------------------------------------
 def build_query_text(a: AttributeQuery) -> str:
@@ -546,6 +724,7 @@ def retrieve(query_text: str, top_k: int) -> list[dict]:
                 "notes": md.get("notes", ""),
                 "context": md.get("context", ""),
                 "source_file": md.get("source_file", ""),
+                "kind": md.get("kind", "mapping"),
                 "similarity": sim,
             }
         )
@@ -556,8 +735,9 @@ BASE_SYSTEM_PROMPT = """You are an expert data modeler specializing in the OAGIS
 
 You will be given:
 1. A new attribute that needs to be mapped.
-2. A set of RETRIEVED prior mappings from the team's internal database — these are the ground truth for how the team has historically mapped similar attributes. They should strongly inform your recommendation.
-3. (Optional) TEAM CONVENTIONS — house rules on path notation, noun selection, and preferred extension patterns. Follow these strictly; they override generic OAGIS defaults.
+2. RETRIEVED PRIOR MAPPINGS from the team's internal database — the ground truth for how the team has historically mapped similar attributes. These are your strongest signal; a near-identical prior mapping should almost always win.
+3. RETRIEVED CANONICAL OAGIS PATHS seeded from the OAGIS XSD — valid locations in the schema itself. Use these to verify that a path actually exists, or to propose one when no prior mapping is close. A canonical path alone is NOT a precedent — it just proves the location is legal. Prefer prior mappings over canonical paths when they conflict, unless the canonical data makes it obvious the prior mapping is wrong.
+4. (Optional) TEAM CONVENTIONS — house rules on path notation, noun selection, and preferred extension patterns. Follow these strictly; they override generic OAGIS defaults.
 
 Your job:
 - Propose 1-3 candidate OAGIS paths, ranked by confidence.
@@ -602,9 +782,11 @@ def load_system_prompt() -> str:
 
 
 def build_user_prompt(a: AttributeQuery, retrieved: list[dict]) -> str:
-    ctx_lines = []
-    for i, r in enumerate(retrieved, 1):
-        ctx_lines.append(
+    mappings = [r for r in retrieved if r.get("kind") != "canonical"]
+    canonical = [r for r in retrieved if r.get("kind") == "canonical"]
+
+    def fmt_mapping(i: int, r: dict) -> str:
+        return (
             f"[{i}] similarity={r['similarity']}\n"
             f"    source_attribute: {r['source_attribute']}\n"
             f"    data_type: {r['data_type']}\n"
@@ -614,7 +796,26 @@ def build_user_prompt(a: AttributeQuery, retrieved: list[dict]) -> str:
             f"    notes: {r['notes']}\n"
             f"    from file: {r['source_file']}"
         )
-    ctx_block = "\n\n".join(ctx_lines) if ctx_lines else "(no prior mappings retrieved — index is empty or no close matches)"
+
+    def fmt_canonical(i: int, r: dict) -> str:
+        return (
+            f"[C{i}] similarity={r['similarity']}\n"
+            f"    oagis_path: {r['oagis_path']}\n"
+            f"    element: {r['source_attribute']}\n"
+            f"    xsd_type: {r['data_type']}\n"
+            f"    documentation: {r['description']}"
+        )
+
+    mapping_block = (
+        "\n\n".join(fmt_mapping(i, r) for i, r in enumerate(mappings, 1))
+        if mappings
+        else "(no prior mappings retrieved — either the index has none yet or none are close to this attribute)"
+    )
+    canonical_block = (
+        "\n\n".join(fmt_canonical(i, r) for i, r in enumerate(canonical, 1))
+        if canonical
+        else "(no canonical OAGIS paths retrieved — the schema index is empty or has no close match)"
+    )
 
     return f"""NEW ATTRIBUTE TO MAP:
   name: {a.name}
@@ -622,9 +823,13 @@ def build_user_prompt(a: AttributeQuery, retrieved: list[dict]) -> str:
   description: {a.description or "(not provided)"}
   context: {a.context or "(not provided)"}
 
-RETRIEVED PRIOR MAPPINGS (ranked by similarity, most similar first):
+RETRIEVED PRIOR MAPPINGS (team's historical mappings — precedent, strongest signal):
 
-{ctx_block}
+{mapping_block}
+
+RETRIEVED CANONICAL OAGIS PATHS (valid locations in the schema — use to confirm a path exists, or to propose one when there's no close prior mapping):
+
+{canonical_block}
 
 Recommend the best OAGIS path(s) for this attribute. Respond with the JSON schema only."""
 

@@ -20,10 +20,36 @@ The server reads `LLM_API_KEY` from the environment (or `.env`). `data/` is wher
 
 ## Giving the LLM additional context
 
-There are two ways to layer team-specific context on top of the built-in OAGIS system prompt:
+There are three ways to layer team-specific context on top of the built-in OAGIS system prompt:
 
 1. **`team_conventions.md`** — a team-editable markdown file at the repo root. It's appended to the system prompt on **every** call under a `TEAM CONVENTIONS` header. Use it for house rules: path notation, preferred nouns, extension patterns, terminology. The file is re-read on every request, so edits don't require a server restart.
 2. **Per-request "Extra instructions"** — both the single and batch tabs have an optional textarea for one-off guidance that applies only to that request (e.g. "this batch is all serialized hardware — prefer `/ItemInstance` paths"). Sent as `extra_instructions` in the JSON payload to `/api/map`.
+3. **Canonical OAGIS schema** — seed the vector store directly from an OAGIS XSD release so the LLM sees valid schema paths even when no prior mapping is close. See next section.
+
+## Seeding canonical OAGIS paths from the XSD
+
+Out of the box, the assistant's only OAGIS knowledge comes from the mappings you've ingested. For full schema awareness, point `scripts/seed_oagis_xsd.py` at a local copy of the OAGIS XSDs (download from [oagi.org](https://oagi.org)) and it will flatten every element path in the schema and load them into the vector store under a single `OAGIS canonical schema` pseudo-upload, tagged with `kind="canonical"` so the LLM can distinguish them from precedent mappings.
+
+```bash
+# Dry run — print stats + sample rows, no server calls
+python scripts/seed_oagis_xsd.py --xsd-dir /path/to/OAGIS/10.11/Model/Nouns --dry-run
+
+# Seed everything (uses /api/seed/canonical on a running server)
+python scripts/seed_oagis_xsd.py --xsd-dir /path/to/OAGIS/10.11/Model/Nouns
+
+# Seed only specific Nouns (much smaller index, faster retrieval)
+python scripts/seed_oagis_xsd.py --xsd-dir .../Nouns \
+  --noun ItemMaster --noun ItemInstance \
+  --noun PurchaseOrder --noun SalesOrder \
+  --noun Invoice --noun Shipment
+
+# Tune recursion depth (default 6)
+python scripts/seed_oagis_xsd.py --xsd-dir .../Nouns --max-depth 8
+```
+
+Re-running the seeder replaces the existing canonical entries by default (send `replace_existing=false` in the payload to append instead). The seeded schema shows up in the library panel as `OAGIS canonical schema` and can be deleted like any other upload.
+
+At retrieval time, prior mappings and canonical paths are pulled together by cosine similarity, then split into two labeled sections in the prompt so the LLM treats precedents as authoritative and canonical paths as a validity check / fallback.
 
 ## Stack
 
@@ -38,6 +64,7 @@ There are two ways to layer team-specific context on top of the built-in OAGIS s
 ```
 server.py                   # FastAPI app, ingestion + retrieval + LLM pipeline
 team_conventions.md         # Team-editable house rules appended to system prompt
+scripts/seed_oagis_xsd.py   # CLI: load canonical OAGIS paths from an XSD directory
 static/index.html           # Single-page UI
 static/app.css              # Styles (dark theme)
 static/app.js               # Frontend logic
@@ -52,4 +79,4 @@ data/                       # Runtime state (chroma + sqlite + ingested files) �
 - **Refine LLM behavior** — edit `team_conventions.md` to add house rules without touching code. Runtime reload, no restart needed.
 - **Different embeddings** — change `EMBED_MODEL_NAME`. Make sure you wipe `data/chroma` after switching, since dims differ.
 - **Databricks deployment** — the retrieval pipeline is a pure function of `(query_text, top_k) -> list[dict]`; lift-and-shift into a Databricks notebook and swap ChromaDB for Databricks Vector Search by implementing a parallel `retrieve()` against a Delta-backed index.
-- **Add your ontology** — if you have a machine-readable OAGIS schema (XSD or RDF), you can seed the Chroma collection with canonical paths (empty `source_attribute`, OAGIS path as the key) to give the LLM a grounding even when no prior mapping exists.
+- **Add your ontology** — see the seeding section above. `scripts/seed_oagis_xsd.py` walks an OAGIS XSD release and loads every element path as a canonical entry.

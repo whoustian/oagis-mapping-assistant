@@ -56,7 +56,11 @@ async function refreshHealth() {
     const j = await r.json();
     $('#status-pill').classList.add('ok');
     $('#status-pill').classList.remove('err');
-    $('#status-text').textContent = `${j.mappings_indexed.toLocaleString()} mappings indexed`;
+    const mappings = (j.mappings_indexed ?? 0).toLocaleString();
+    const canonical = j.canonical_indexed ?? 0;
+    $('#status-text').textContent = canonical > 0
+      ? `${mappings} mappings · ${canonical.toLocaleString()} canonical paths`
+      : `${mappings} mappings indexed`;
   } catch (e) {
     $('#status-pill').classList.add('err');
     $('#status-text').textContent = 'server unreachable';
@@ -279,19 +283,23 @@ function renderSingleResult(result) {
 
   const retrievedHtml = retrieved.length
     ? retrieved
-        .map(
-          (r) => `
-      <div class="ret-item">
+        .map((r) => {
+          const isCanonical = r.kind === 'canonical';
+          const badge = isCanonical
+            ? '<span class="kind-badge canonical">CANONICAL</span>'
+            : '';
+          return `
+      <div class="ret-item${isCanonical ? ' canonical' : ''}">
         <div class="head">
-          <div class="src">${escapeHtml(r.source_attribute)}</div>
+          <div class="src">${badge}${escapeHtml(r.source_attribute)}</div>
           <div>sim ${r.similarity ?? '—'}</div>
         </div>
         <div class="path">${escapeHtml(r.oagis_path)}</div>
         <div class="meta">${r.data_type ? escapeHtml(r.data_type) + ' · ' : ''}${escapeHtml(r.description || '')}</div>
-        ${r.notes ? `<div class="meta"><i>Notes:</i> ${escapeHtml(r.notes)}</div>` : ''}
+        ${r.notes && !isCanonical ? `<div class="meta"><i>Notes:</i> ${escapeHtml(r.notes)}</div>` : ''}
         <div class="meta muted">from ${escapeHtml(r.source_file || '')}</div>
-      </div>`
-        )
+      </div>`;
+        })
         .join('')
     : '<div class="muted small">No prior mappings retrieved (index may be empty).</div>';
 
