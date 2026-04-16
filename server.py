@@ -391,10 +391,17 @@ def upload_commit(req: CommitRequest):
         with db() as conn:
             conn.execute("DELETE FROM uploads")
 
+    # Dedupe by stable ID as we go. Chroma's upsert() will raise
+    # DuplicateIDError if the same ID appears twice in a single call, and large
+    # spreadsheets routinely have duplicate (source_attribute, oagis_path,
+    # description) triples. We keep the LAST occurrence for each ID so the
+    # most recent row in the sheet wins.
+    seen: dict[str, int] = {}          # id -> index in the parallel lists below
     ids: list[str] = []
     docs: list[str] = []
     metas: list[dict] = []
     skipped = 0
+    duplicates = 0
 
     for _, row in df.iterrows():
         rowd = {str(k): v for k, v in row.to_dict().items()}
@@ -408,6 +415,15 @@ def upload_commit(req: CommitRequest):
         ).hexdigest()[:16]
         meta["upload_id"] = req.upload_id
         meta["source_file"] = filename
+        if h in seen:
+            # Same logical mapping already seen in this batch — overwrite in
+            # place with the latest row rather than crashing the upsert.
+            idx = seen[h]
+            docs[idx] = doc
+            metas[idx] = meta
+            duplicates += 1
+            continue
+        seen[h] = len(ids)
         ids.append(h)
         docs.append(doc)
         metas.append(meta)
@@ -415,21 +431,58 @@ def upload_commit(req: CommitRequest):
     if not docs:
         raise HTTPException(400, "no valid rows found with both a source attribute and OAGIS path")
 
+    if duplicates:
+        log.info(
+            "Collapsed %d duplicate rows (same source_attribute+oagis_path+description) during ingest",
+            duplicates,
+        )
+
     # Batch-embed for speed
     log.info("Embedding %d rows...", len(docs))
     t0 = time.time()
     embeddings = embedder.encode(docs, batch_size=64, show_progress_bar=False).tolist()
     log.info("Embedded in %.2fs", time.time() - t0)
 
-    # Chroma upsert in chunks
+    # Chroma upsert in chunks. Wrap each chunk so one bad chunk doesn't abort
+    # the whole ingest — we fall back to per-row upsert and log the offenders.
     CHUNK = 500
+    failed_rows = 0
     for i in range(0, len(docs), CHUNK):
-        collection.upsert(
-            ids=ids[i : i + CHUNK],
-            documents=docs[i : i + CHUNK],
-            metadatas=metas[i : i + CHUNK],
-            embeddings=embeddings[i : i + CHUNK],
-        )
+        chunk_ids = ids[i : i + CHUNK]
+        chunk_docs = docs[i : i + CHUNK]
+        chunk_metas = metas[i : i + CHUNK]
+        chunk_embs = embeddings[i : i + CHUNK]
+        try:
+            collection.upsert(
+                ids=chunk_ids,
+                documents=chunk_docs,
+                metadatas=chunk_metas,
+                embeddings=chunk_embs,
+            )
+        except Exception as chunk_err:
+            log.warning(
+                "Chunk upsert failed (%s) — retrying row-by-row for rows %d..%d",
+                chunk_err,
+                i,
+                i + len(chunk_ids) - 1,
+            )
+            for j in range(len(chunk_ids)):
+                try:
+                    collection.upsert(
+                        ids=[chunk_ids[j]],
+                        documents=[chunk_docs[j]],
+                        metadatas=[chunk_metas[j]],
+                        embeddings=[chunk_embs[j]],
+                    )
+                except Exception as row_err:
+                    failed_rows += 1
+                    log.error(
+                        "Skipping row %d (id=%s, source_attribute=%r): %s",
+                        i + j,
+                        chunk_ids[j],
+                        chunk_metas[j].get("source_attribute"),
+                        row_err,
+                    )
 
     with db() as conn:
         conn.execute(
@@ -448,10 +501,13 @@ def upload_commit(req: CommitRequest):
     final_path = DATA_DIR / f"ingested_{req.upload_id}_{filename}"
     staging_path.rename(final_path)
 
+    indexed = len(docs) - failed_rows
     return {
         "ok": True,
-        "indexed": len(docs),
+        "indexed": indexed,
         "skipped_missing_required": skipped,
+        "collapsed_duplicates": duplicates,
+        "failed_rows": failed_rows,
         "total_in_index": collection.count(),
     }
 
