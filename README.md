@@ -1,0 +1,1 @@
+# oagis-mapping-assistant
