@@ -11,12 +11,8 @@ they're phrased as rules, not prose.
 
 ## Path notation
 
-- Use forward-slash XPath style with a leading slash: `/ItemMaster/ItemID/ID`
-- Never use BOD-prefixed paths (e.g. `/GetItemMaster/DataArea/ItemMaster/...`) —
-  we always map to the Noun level, and the BOD wrapper is implied.
-- For attributes on elements, use the `@` notation: `/Invoice/InvoiceHeader/TotalAmount/Amount/@currencyID`
-- For predicate-filtered paths on generic Property bags, use
-  `[Name=...]`: `/ItemMaster/Specification/Property[Name=Weight]/Value`
+- Use dot-notation XPath style: `ItemMaster.ItemID.ID`
+- For attributes on elements, use the `[typeCode=""]` notation: `Invoice.InvoiceHeader.TotalAmount.Amount[typeCode="CurrencyId"]`
 
 ## Noun selection conventions
 
@@ -29,9 +25,9 @@ they're phrased as rules, not prose.
 ## Preferred extension patterns
 
 - When a source attribute has no canonical OAGIS location, prefer the
-  `Specification/Property[Name=...]/Value` pattern on ItemMaster or ItemInstance
-  over adding custom elements.
+  `Extension` pattern over adding custom elements.
 - Flag for human review anything that would require a UserArea extension.
+- For any true/false flag use `Classification.Indicators.Indicator`
 
 ## Team terminology mapping
 
