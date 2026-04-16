@@ -4,5 +4,6 @@ chromadb
 sentence-transformers
 openpyxl
 python-multipart
-anthropic
+openai
+python-dotenv
 pandas

@@ -22,7 +22,8 @@ from typing import Any, Optional
 
 import chromadb
 import pandas as pd
-from anthropic import Anthropic
+from dotenv import load_dotenv
+from openai import OpenAI
 from chromadb.config import Settings
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -33,6 +34,8 @@ from sentence_transformers import SentenceTransformer
 # ---------------------------------------------------------------------------
 # Config & logging
 # ---------------------------------------------------------------------------
+load_dotenv()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
@@ -49,7 +52,7 @@ STATIC_DIR = BASE_DIR / "static"
 
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 COLLECTION_NAME = "oagis_mappings"
-DEFAULT_LLM_MODEL = "claude_sonnet_4_6"
+DEFAULT_LLM_MODEL = "claude-4-5-sonnet-latest"
 
 # ---------------------------------------------------------------------------
 # Shared singletons
@@ -68,7 +71,10 @@ collection = chroma_client.get_or_create_collection(
 )
 log.info("Chroma collection ready: %s (count=%d)", COLLECTION_NAME, collection.count())
 
-anthropic_client = Anthropic()
+openai_client = OpenAI(
+    api_key=os.getenv("LLM_API_KEY"),
+    base_url="https://api.ai.us.lmco.com/v1"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -544,13 +550,15 @@ Recommend the best OAGIS path(s) for this attribute. Respond with the JSON schem
 
 def call_llm(user_prompt: str, model: str) -> dict:
     try:
-        resp = anthropic_client.messages.create(
+        resp = openai_client.chat.completions.create(
             model=model,
             max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
         )
-        text = resp.content[0].text.strip()
+        text = resp.choices[0].message.content.strip()
         # Claude may wrap in ```json ... ```
         if text.startswith("```"):
             text = text.split("\n", 1)[1]
