@@ -156,7 +156,12 @@ $('#btn-commit').addEventListener('click', async () => {
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || r.statusText);
-    toast(`Indexed ${j.indexed} mappings (skipped ${j.skipped_missing_required}). Total: ${j.total_in_index}.`);
+    const bits = [`Indexed ${j.indexed.toLocaleString()} mappings`];
+    if (j.skipped_missing_required) bits.push(`skipped ${j.skipped_missing_required} missing required fields`);
+    if (j.collapsed_duplicates) bits.push(`collapsed ${j.collapsed_duplicates} duplicate rows`);
+    if (j.failed_rows) bits.push(`${j.failed_rows} rows failed (see server log)`);
+    bits.push(`Total in index: ${j.total_in_index.toLocaleString()}`);
+    toast(bits.join(' — ') + '.');
     $('#preview-card').classList.add('hidden');
     $('#file-input').value = '';
     currentPreview = null;
