@@ -545,6 +545,142 @@ def upload_commit(req: CommitRequest):
 
 
 # ---------------------------------------------------------------------------
+# Batch-map spreadsheet parsing
+#
+# The Batch Map UI historically required users to type `name | data_type |
+# description | context` lines by hand. This endpoint accepts an uploaded
+# spreadsheet (xlsx / xlsm / xls / csv) and returns the attribute rows already
+# parsed into the shape /api/map expects. Column roles are auto-detected using
+# the same DETECTION_HINTS used for the library upload flow; the caller can
+# override via the `columns` form field (JSON: {role: column_name}).
+#
+# Nothing is written to the vector store — this is a pure read that turns a
+# spreadsheet into JSON so the browser can POST it to /api/map.
+# ---------------------------------------------------------------------------
+BATCH_ROLE_TO_FIELD = {
+    "source_attribute": "name",
+    "data_type": "data_type",
+    "description": "description",
+    "context": "context",
+}
+
+
+@app.post("/api/batch/parse")
+async def batch_parse(
+    file: UploadFile = File(...),
+    sheet: Optional[str] = Form(None),
+    columns: Optional[str] = Form(None),
+    max_rows: Optional[int] = Form(None),
+):
+    """Parse a spreadsheet into a list of batch-map attribute rows.
+
+    Returns the full set of sheets + columns so the UI can offer a picker
+    (mirrors /api/upload/preview), and also returns the parsed attribute rows
+    ready to feed straight into /api/map.
+    """
+    if not file.filename:
+        raise HTTPException(400, "no filename")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "empty file")
+
+    suffix = Path(file.filename).suffix.lower()
+    buf = io.BytesIO(raw)
+    try:
+        if suffix in (".xlsx", ".xlsm", ".xls"):
+            xls = pd.ExcelFile(buf, engine="openpyxl")
+            sheets = xls.sheet_names
+            active_sheet = sheet if sheet and sheet in sheets else sheets[0]
+            df = pd.read_excel(buf, sheet_name=active_sheet, engine="openpyxl")
+        elif suffix == ".csv":
+            sheets = ["(csv)"]
+            active_sheet = "(csv)"
+            df = pd.read_csv(io.BytesIO(raw))
+        else:
+            raise HTTPException(400, f"unsupported file type: {suffix or '(none)'}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"could not parse file: {e}")
+
+    df = df.fillna("")
+    all_columns = [str(c) for c in df.columns]
+    detected = detect_columns(all_columns)
+
+    # Caller override (JSON blob in a form field, since this is multipart)
+    chosen: dict[str, str] = {}
+    if columns:
+        try:
+            override = json.loads(columns)
+            if isinstance(override, dict):
+                for role, col in override.items():
+                    if isinstance(col, str) and col and col in all_columns:
+                        chosen[role] = col
+        except json.JSONDecodeError:
+            raise HTTPException(400, "`columns` must be a JSON object")
+
+    # Fill in anything the caller didn't override
+    for role, col in detected.items():
+        chosen.setdefault(role, col)
+
+    name_col = chosen.get("source_attribute")
+    if not name_col:
+        return {
+            "ok": False,
+            "error": "Could not find an attribute-name column. Pick one explicitly.",
+            "sheets": sheets,
+            "active_sheet": active_sheet,
+            "columns": all_columns,
+            "detected": detected,
+            "attributes": [],
+            "skipped_empty": 0,
+            "total_rows": int(len(df)),
+        }
+
+    # Build attribute rows
+    attrs: list[dict] = []
+    skipped_empty = 0
+    # Cap defensively — Batch Map hits the LLM once per row
+    hard_cap = max(1, min(int(max_rows or 2000), 5000))
+
+    for _, r in df.iterrows():
+        def pick(role: str) -> str:
+            col = chosen.get(role)
+            if not col:
+                return ""
+            v = r.get(col, "")
+            return "" if v is None else str(v).strip()
+
+        name = pick("source_attribute")
+        if not name:
+            skipped_empty += 1
+            continue
+        attrs.append(
+            {
+                "name": name,
+                "data_type": pick("data_type"),
+                "description": pick("description"),
+                "context": pick("context"),
+            }
+        )
+        if len(attrs) >= hard_cap:
+            break
+
+    return {
+        "ok": True,
+        "sheets": sheets,
+        "active_sheet": active_sheet,
+        "columns": all_columns,
+        "detected": detected,
+        "resolved": chosen,
+        "attributes": attrs,
+        "skipped_empty": skipped_empty,
+        "total_rows": int(len(df)),
+        "truncated": len(attrs) >= hard_cap and int(len(df)) > hard_cap,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Canonical OAGIS schema seeding
 # ---------------------------------------------------------------------------
 class CanonicalRow(BaseModel):

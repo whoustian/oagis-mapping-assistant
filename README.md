@@ -26,6 +26,14 @@ There are three ways to layer team-specific context on top of the built-in OAGIS
 2. **Per-request "Extra instructions"** — both the single and batch tabs have an optional textarea for one-off guidance that applies only to that request (e.g. "this batch is all serialized hardware — prefer `/ItemInstance` paths"). Sent as `extra_instructions` in the JSON payload to `/api/map`.
 3. **Canonical OAGIS schema** — seed the vector store directly from an OAGIS XSD release so the LLM sees valid schema paths even when no prior mapping is close. See next section.
 
+## Running a batch from a spreadsheet
+
+The **Batch map** tab accepts an Excel or CSV file (`.xlsx`, `.xlsm`, `.xls`, `.csv`) of attributes to map. Upload the file, and the app auto-detects which column holds the attribute name / data type / description / context using the same heuristics as the library ingest. You can override any column from the dropdowns before running. A preview of the first eight parsed rows shows you exactly what will be sent to the LLM.
+
+A legacy pipe-delimited textarea (`name | data_type | description | context`, one row per line) is still available under “Or paste attributes as text” for quick one-off runs without needing a file.
+
+Under the hood this posts the file to `POST /api/batch/parse`, which returns the attribute rows ready to submit to `/api/map`. The parse endpoint caps each run at 2000 rows by default — split larger files into multiple batches.
+
 ## Seeding canonical OAGIS paths from the XSD
 
 Out of the box, the assistant's only OAGIS knowledge comes from the mappings you've ingested. For full schema awareness, point `scripts/seed_oagis_xsd.py` at a local copy of the OAGIS XSDs (download from [oagi.org](https://oagi.org)) and it will flatten every element path in the schema and load them into the vector store under a single `OAGIS canonical schema` pseudo-upload, tagged with `kind="canonical"` so the LLM can distinguish them from precedent mappings.

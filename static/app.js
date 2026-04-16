@@ -22,6 +22,16 @@ const ROLES = [
 
 let currentPreview = null; // preview response
 let lastBatchResults = null;
+let currentBatchParse = null; // parsed spreadsheet for the Batch Map tab
+
+// Roles we surface for the Batch Map column picker. Narrower than the
+// Library's ROLES because Batch Map doesn't need oagis_path / notes.
+const BATCH_ROLES = [
+  { key: 'source_attribute', label: 'Attribute name *', required: true },
+  { key: 'data_type', label: 'Data type', required: false },
+  { key: 'description', label: 'Description', required: false },
+  { key: 'context', label: 'Context / source system', required: false },
+];
 
 // ============================================================
 // Tabs
@@ -317,13 +327,111 @@ function renderSingleResult(result) {
 // ============================================================
 // Batch mapping
 // ============================================================
-$('#btn-batch').addEventListener('click', async () => {
-  const raw = $('#batch-input').value.trim();
-  if (!raw) {
-    toast('Paste at least one attribute.', true);
-    return;
+
+// -- Spreadsheet upload path (primary) --------------------------------------
+$('#batch-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  await parseBatchFile({}); // auto-detect columns on first parse
+});
+
+async function parseBatchFile({ sheet, columnsOverride }) {
+  const fileInput = $('#batch-file');
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  const fd = new FormData();
+  fd.append('file', file);
+  if (sheet) fd.append('sheet', sheet);
+  if (columnsOverride) fd.append('columns', JSON.stringify(columnsOverride));
+
+  toast('Parsing spreadsheet…');
+  try {
+    const r = await fetch(api('/api/batch/parse'), { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || r.statusText);
+    currentBatchParse = j;
+    currentBatchParse._file = file;
+    renderBatchParse();
+    if (j.ok) {
+      toast(`Parsed ${j.attributes.length} attribute${j.attributes.length === 1 ? '' : 's'}.`);
+    } else {
+      toast(j.error || 'Parsed, but no attribute column found — pick one below.', true);
+    }
+  } catch (err) {
+    toast('Parse failed: ' + err.message, true);
   }
-  const attrs = raw
+}
+
+function renderBatchParse() {
+  const p = currentBatchParse;
+  if (!p) return;
+  $('#batch-preview').classList.remove('hidden');
+
+  // File meta
+  const f = p._file;
+  $('#batch-file-meta').textContent = f ? `${f.name} · ${(f.size / 1024).toFixed(1)} KB` : '';
+
+  // Sheet picker
+  const sheetSel = $('#batch-sheet');
+  sheetSel.innerHTML = (p.sheets || [])
+    .map((s) => `<option ${s === p.active_sheet ? 'selected' : ''}>${escapeHtml(s)}</option>`)
+    .join('');
+  sheetSel.onchange = () => parseBatchFile({ sheet: sheetSel.value });
+
+  // Column-role picker (only attribute-side roles)
+  const rolesEl = $('#batch-col-roles');
+  rolesEl.innerHTML = BATCH_ROLES.map((role) => {
+    const current = (p.resolved && p.resolved[role.key]) || p.detected?.[role.key] || '';
+    const opts = [`<option value="">— none —</option>`]
+      .concat(
+        (p.columns || []).map(
+          (c) => `<option value="${escapeAttr(c)}" ${c === current ? 'selected' : ''}>${escapeHtml(c)}</option>`
+        )
+      )
+      .join('');
+    return `<label>${role.label}<select data-batch-role="${role.key}">${opts}</select></label>`;
+  }).join('');
+  $$('#batch-col-roles select').forEach((s) => {
+    s.addEventListener('change', onBatchColumnsChanged);
+  });
+
+  // Summary line
+  const bits = [];
+  bits.push(`${p.attributes?.length || 0} attribute${(p.attributes?.length || 0) === 1 ? '' : 's'} ready`);
+  if (p.skipped_empty) bits.push(`${p.skipped_empty} rows skipped (blank name)`);
+  if (p.total_rows != null) bits.push(`${p.total_rows} total rows in sheet`);
+  if (p.truncated) bits.push('truncated to 2000 rows — split your file if you need more');
+  $('#batch-parse-summary').textContent = bits.join(' · ');
+
+  // Preview of first 8 parsed attribute rows
+  const tbl = $('#batch-preview-table');
+  const rows = (p.attributes || []).slice(0, 8);
+  if (!rows.length) {
+    tbl.innerHTML = '<tbody><tr><td class="muted">No rows parsed yet — pick the attribute-name column above.</td></tr></tbody>';
+  } else {
+    const head = `<thead><tr><th>Attribute name</th><th>Data type</th><th>Description</th><th>Context</th></tr></thead>`;
+    const body = `<tbody>${rows
+      .map(
+        (a) =>
+          `<tr><td>${escapeHtml(a.name)}</td><td>${escapeHtml(a.data_type)}</td><td>${escapeHtml(a.description)}</td><td>${escapeHtml(a.context)}</td></tr>`
+      )
+      .join('')}</tbody>`;
+    tbl.innerHTML = head + body;
+  }
+}
+
+function onBatchColumnsChanged() {
+  const override = {};
+  $$('#batch-col-roles select').forEach((s) => {
+    if (s.value) override[s.dataset.batchRole] = s.value;
+  });
+  parseBatchFile({ sheet: $('#batch-sheet').value || undefined, columnsOverride: override });
+}
+
+// -- Parse pipe-delimited text (fallback) -----------------------------------
+function parsePipeText(raw) {
+  return raw
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean)
@@ -331,6 +439,25 @@ $('#btn-batch').addEventListener('click', async () => {
       const [name, data_type = '', description = '', context = ''] = l.split('|').map((s) => s.trim());
       return { name, data_type, description, context };
     });
+}
+
+// -- Run Batch --------------------------------------------------------------
+$('#btn-batch').addEventListener('click', async () => {
+  // Prefer the parsed spreadsheet; fall back to the pipe-text textarea.
+  let attrs = [];
+  if (currentBatchParse && currentBatchParse.ok && (currentBatchParse.attributes || []).length) {
+    attrs = currentBatchParse.attributes;
+  } else {
+    const raw = ($('#batch-input').value || '').trim();
+    if (raw) {
+      attrs = parsePipeText(raw);
+    }
+  }
+
+  if (!attrs.length) {
+    toast('Upload a spreadsheet or paste at least one attribute.', true);
+    return;
+  }
 
   const btn = $('#btn-batch');
   btn.disabled = true;

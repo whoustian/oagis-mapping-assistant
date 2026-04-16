@@ -89,13 +89,40 @@
         <div class="card">
           <h2>Batch map attributes</h2>
           <p class="muted">
-            Paste one attribute per line. Use <code>|</code> to separate fields in the order:
-            <code>name | data_type | description | context</code>. Only the name is required.
+            Upload a spreadsheet (<code>.xlsx</code>, <code>.xlsm</code>, <code>.xls</code>, or <code>.csv</code>)
+            of attributes you want mapped. Columns are auto-detected — you can override them below before running.
           </p>
-          <textarea id="batch-input" rows="10" placeholder="PartSerialNumber | String(50) | Unique serial assigned per part | Avionics TDP
+          <label class="file-label">
+            <input type="file" id="batch-file" accept=".xlsx,.xlsm,.xls,.csv" />
+          </label>
+
+          <div class="hidden" id="batch-preview">
+            <div class="row-2 align-end" style="margin-top:12px">
+              <label>
+                Sheet
+                <select id="batch-sheet"></select>
+              </label>
+              <div class="muted small" id="batch-file-meta"></div>
+            </div>
+            <div id="batch-col-roles" class="grid-2" style="margin-top:10px"></div>
+            <div class="muted small" id="batch-parse-summary" style="margin-top:8px"></div>
+            <div class="scroll-x" style="margin-top:8px">
+              <table class="preview-table" id="batch-preview-table"></table>
+            </div>
+          </div>
+
+          <details class="pipe-fallback" id="batch-pipe-details" style="margin-top:14px">
+            <summary class="muted small">Or paste attributes as text (legacy pipe-delimited mode)</summary>
+            <p class="muted small" style="margin-top:8px">
+              One per line, fields separated by <code>|</code>:
+              <code>name | data_type | description | context</code>. Only the name is required.
+            </p>
+            <textarea id="batch-input" rows="8" placeholder="PartSerialNumber | String(50) | Unique serial assigned per part | Avionics TDP
 ManufactureDate | Date | Date part was built | Avionics TDP
 AssemblyRevCode"></textarea>
-          <label>
+          </details>
+
+          <label style="margin-top:10px">
             Extra instructions for the LLM <span class="muted">(optional — applies to every row in this batch)</span>
             <textarea id="batch-extra" rows="2" placeholder="e.g. 'This batch is all serialized hardware — prefer /ItemInstance paths.'"></textarea>
           </label>
