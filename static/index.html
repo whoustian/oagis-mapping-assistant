@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>OAGIS Mapping Assistant</title>
+    <link rel="preconnect" href="https://api.fontshare.com" />
+    <link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,600,700&f[]=jetbrains-mono@400,500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="none" aria-label="OAGIS Mapper">
+          <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.5" />
+          <rect x="18" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.5" />
+          <rect x="10" y="18" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.5" />
+          <path d="M8 14 L16 18 M24 14 L16 18" stroke="currentColor" stroke-width="1.5" />
+        </svg>
+        <div>
+          <div class="brand-title">OAGIS Mapping Assistant</div>
+          <div class="brand-sub">RAG over your team's prior mappings</div>
+        </div>
+      </div>
+      <div class="status" id="status-pill">
+        <span class="dot"></span>
+        <span id="status-text">loading…</span>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="single">Map attribute</button>
+      <button class="tab" data-tab="batch">Batch map</button>
+      <button class="tab" data-tab="library">Mapping library</button>
+    </nav>
+
+    <main>
+      <!-- ================= SINGLE ================= -->
+      <section class="panel" id="tab-single">
+        <div class="grid-2">
+          <div class="card">
+            <h2>New attribute</h2>
+            <p class="muted">Describe the attribute you need to slot into OAGIS. The more context, the better the retrieval.</p>
+            <label>
+              Attribute name <span class="req">*</span>
+              <input id="q-name" type="text" placeholder="e.g. PartSerialNumber" />
+            </label>
+            <div class="row-2">
+              <label>
+                Data type
+                <input id="q-type" type="text" placeholder="e.g. String(50)" />
+              </label>
+              <label>
+                Context / source
+                <input id="q-context" type="text" placeholder="e.g. Technical Data Package — Avionics" />
+              </label>
+            </div>
+            <label>
+              Description
+              <textarea id="q-desc" rows="3" placeholder="Free-text definition, business meaning, sample values…"></textarea>
+            </label>
+            <div class="row-2 align-end">
+              <label>
+                Examples to retrieve (K)
+                <input id="q-k" type="number" min="1" max="20" value="6" />
+              </label>
+              <button class="primary" id="btn-map">Recommend mapping</button>
+            </div>
+          </div>
+
+          <div class="card" id="result-card">
+            <h2>Recommendation</h2>
+            <div id="result-empty" class="muted">Enter an attribute and hit <b>Recommend mapping</b>.</div>
+            <div id="result-loading" class="hidden">
+              <div class="spinner"></div>
+              <div class="muted">Retrieving similar prior mappings and consulting Claude…</div>
+            </div>
+            <div id="result-body" class="hidden"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= BATCH ================= -->
+      <section class="panel hidden" id="tab-batch">
+        <div class="card">
+          <h2>Batch map attributes</h2>
+          <p class="muted">
+            Paste one attribute per line. Use <code>|</code> to separate fields in the order:
+            <code>name | data_type | description | context</code>. Only the name is required.
+          </p>
+          <textarea id="batch-input" rows="10" placeholder="PartSerialNumber | String(50) | Unique serial assigned per part | Avionics TDP
+ManufactureDate | Date | Date part was built | Avionics TDP
+AssemblyRevCode"></textarea>
+          <div class="row-2 align-end">
+            <label>
+              K per attribute
+              <input id="batch-k" type="number" min="1" max="20" value="5" />
+            </label>
+            <button class="primary" id="btn-batch">Run batch</button>
+          </div>
+        </div>
+
+        <div class="card hidden" id="batch-result-card">
+          <h2>Batch results</h2>
+          <div class="row-2 align-end">
+            <div class="muted" id="batch-summary"></div>
+            <button class="secondary" id="btn-batch-csv">Download CSV</button>
+          </div>
+          <div id="batch-results"></div>
+        </div>
+      </section>
+
+      <!-- ================= LIBRARY ================= -->
+      <section class="panel hidden" id="tab-library">
+        <div class="grid-2">
+          <div class="card">
+            <h2>Ingest mapping spreadsheet</h2>
+            <p class="muted">Upload an Excel or CSV of prior mappings. You'll confirm which columns hold the source attribute and OAGIS path before it's indexed.</p>
+            <input type="file" id="file-input" accept=".xlsx,.xlsm,.xls,.csv" />
+            <div id="preview-card" class="hidden">
+              <h3>Preview</h3>
+              <div class="row-2">
+                <label>
+                  Sheet
+                  <select id="sheet-select"></select>
+                </label>
+                <label class="checkbox-inline">
+                  <input type="checkbox" id="replace-existing" />
+                  Replace entire index
+                </label>
+              </div>
+              <div class="muted small">Map each role to one of your columns. Auto-detected picks are pre-filled — adjust if wrong.</div>
+              <div class="col-roles" id="col-roles"></div>
+              <div class="preview-table-wrap">
+                <table id="preview-table"></table>
+              </div>
+              <button class="primary" id="btn-commit">Index this mapping</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>Indexed files</h2>
+            <div id="uploads-list" class="muted">(nothing indexed yet)</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
