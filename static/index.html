@@ -63,6 +63,13 @@
               Extra instructions for the LLM <span class="muted">(optional)</span>
               <textarea id="q-extra" rows="2" placeholder="One-off hints for this request only — e.g. 'treat this as an ItemInstance attribute' or 'prefer Specification/Property over custom elements'."></textarea>
             </label>
+            <label class="toggle-row" title="Ignore prior team mappings and recommend strictly from the seeded OAGIS XSD schema.">
+              <input type="checkbox" id="q-canonical-only" />
+              <span>
+                <b>Canonical-only mode</b>
+                <span class="muted small" id="q-canonical-only-hint">Ignore prior team mappings — evaluate solely against the seeded OAGIS XSD.</span>
+              </span>
+            </label>
             <div class="row-2 align-end">
               <label>
                 Examples to retrieve (K)
@@ -125,6 +132,13 @@ AssemblyRevCode"></textarea>
           <label style="margin-top:10px">
             Extra instructions for the LLM <span class="muted">(optional — applies to every row in this batch)</span>
             <textarea id="batch-extra" rows="2" placeholder="e.g. 'This batch is all serialized hardware — prefer /ItemInstance paths.'"></textarea>
+          </label>
+          <label class="toggle-row" title="Ignore prior team mappings and recommend strictly from the seeded OAGIS XSD schema.">
+            <input type="checkbox" id="batch-canonical-only" />
+            <span>
+              <b>Canonical-only mode</b>
+              <span class="muted small" id="batch-canonical-only-hint">Ignore prior team mappings — evaluate solely against the seeded OAGIS XSD.</span>
+            </span>
           </label>
           <div class="row-2 align-end">
             <label>
