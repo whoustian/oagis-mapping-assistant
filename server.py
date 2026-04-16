@@ -214,6 +214,11 @@ class MapRequest(BaseModel):
     # Useful for one-off hints like "this batch is all from the PLM system" or
     # "prefer /ItemInstance paths when in doubt".
     extra_instructions: Optional[str] = ""
+    # When true, retrieval is restricted to canonical OAGIS paths (seeded from
+    # the XSD) and prior team mappings are hidden from the LLM entirely. Used
+    # when the team wants a from-scratch recommendation grounded solely in the
+    # schema — e.g. to sanity-check a prior mapping or to seed a fresh Noun.
+    canonical_only: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -840,11 +845,30 @@ def build_query_text(a: AttributeQuery) -> str:
     return " | ".join(parts)
 
 
-def retrieve(query_text: str, top_k: int) -> list[dict]:
+def retrieve(
+    query_text: str,
+    top_k: int,
+    canonical_only: bool = False,
+) -> list[dict]:
     if collection.count() == 0:
         return []
     emb = embedder.encode([query_text]).tolist()
-    res = collection.query(query_embeddings=emb, n_results=top_k)
+    query_kwargs: dict = {"query_embeddings": emb, "n_results": top_k}
+    if canonical_only:
+        # Restrict ANN search to rows tagged kind="canonical" (seeded from the
+        # OAGIS XSD). If no canonical rows exist, return [] so the caller can
+        # surface a helpful message instead of silently falling back.
+        try:
+            any_canonical = collection.get(
+                where={"kind": "canonical"}, limit=1, include=[]
+            )
+            if not any_canonical.get("ids"):
+                return []
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning("canonical existence check failed: %s", e)
+            return []
+        query_kwargs["where"] = {"kind": "canonical"}
+    res = collection.query(**query_kwargs)
     out = []
     for i in range(len(res["ids"][0])):
         md = res["metadatas"][0][i] or {}
@@ -871,9 +895,11 @@ BASE_SYSTEM_PROMPT = """You are an expert data modeler specializing in the OAGIS
 
 You will be given:
 1. A new attribute that needs to be mapped.
-2. RETRIEVED PRIOR MAPPINGS from the team's internal database — the ground truth for how the team has historically mapped similar attributes. These are your strongest signal; a near-identical prior mapping should almost always win.
+2. RETRIEVED PRIOR MAPPINGS from the team's internal database — the ground truth for how the team has historically mapped similar attributes. These are your strongest signal; a near-identical prior mapping should almost always win. (This section may be intentionally omitted — see below.)
 3. RETRIEVED CANONICAL OAGIS PATHS seeded from the OAGIS XSD — valid locations in the schema itself. Use these to verify that a path actually exists, or to propose one when no prior mapping is close. A canonical path alone is NOT a precedent — it just proves the location is legal. Prefer prior mappings over canonical paths when they conflict, unless the canonical data makes it obvious the prior mapping is wrong.
 4. (Optional) TEAM CONVENTIONS — house rules on path notation, noun selection, and preferred extension patterns. Follow these strictly; they override generic OAGIS defaults.
+
+If the user prompt contains a "CANONICAL-ONLY MODE" banner, the prior-mappings section has been deliberately hidden. In that mode you must NOT invent or reference prior mappings — base every recommendation strictly on the retrieved canonical OAGIS paths and general OAGIS conventions, and leave `supporting_examples` empty.
 
 Your job:
 - Propose 1-3 candidate OAGIS paths, ranked by confidence.
@@ -917,7 +943,11 @@ def load_system_prompt() -> str:
     return prompt
 
 
-def build_user_prompt(a: AttributeQuery, retrieved: list[dict]) -> str:
+def build_user_prompt(
+    a: AttributeQuery,
+    retrieved: list[dict],
+    canonical_only: bool = False,
+) -> str:
     mappings = [r for r in retrieved if r.get("kind") != "canonical"]
     canonical = [r for r in retrieved if r.get("kind") == "canonical"]
 
@@ -942,6 +972,28 @@ def build_user_prompt(a: AttributeQuery, retrieved: list[dict]) -> str:
             f"    documentation: {r['description']}"
         )
 
+    header = f"""NEW ATTRIBUTE TO MAP:
+  name: {a.name}
+  data_type: {a.data_type or "(not provided)"}
+  description: {a.description or "(not provided)"}
+  context: {a.context or "(not provided)"}"""
+
+    if canonical_only:
+        canonical_block = (
+            "\n\n".join(fmt_canonical(i, r) for i, r in enumerate(canonical, 1))
+            if canonical
+            else "(no canonical OAGIS paths retrieved — the schema index is empty or has no close match; recommend based on OAGIS conventions and flag low confidence)"
+        )
+        return f"""{header}
+
+CANONICAL-ONLY MODE: the team has asked you to evaluate this attribute strictly against the OAGIS XSD. Prior team mappings have been deliberately hidden for this request. Do NOT reference or invent prior mappings. Base your recommendation solely on the canonical paths below and general OAGIS conventions. Leave `supporting_examples` empty.
+
+RETRIEVED CANONICAL OAGIS PATHS (valid locations in the schema — the only retrieval signal for this request):
+
+{canonical_block}
+
+Recommend the best OAGIS path(s) for this attribute. Respond with the JSON schema only."""
+
     mapping_block = (
         "\n\n".join(fmt_mapping(i, r) for i, r in enumerate(mappings, 1))
         if mappings
@@ -953,11 +1005,7 @@ def build_user_prompt(a: AttributeQuery, retrieved: list[dict]) -> str:
         else "(no canonical OAGIS paths retrieved — the schema index is empty or has no close match)"
     )
 
-    return f"""NEW ATTRIBUTE TO MAP:
-  name: {a.name}
-  data_type: {a.data_type or "(not provided)"}
-  description: {a.description or "(not provided)"}
-  context: {a.context or "(not provided)"}
+    return f"""{header}
 
 RETRIEVED PRIOR MAPPINGS (team's historical mappings — precedent, strongest signal):
 
@@ -1014,12 +1062,13 @@ def map_attributes(req: MapRequest):
         raise HTTPException(400, "provide at least one attribute")
     model = req.model or DEFAULT_LLM_MODEL
     top_k = max(1, min(req.top_k, 20))
+    canonical_only = bool(req.canonical_only)
 
     results = []
     for a in req.attributes:
         qtext = build_query_text(a)
-        retrieved = retrieve(qtext, top_k)
-        user_prompt = build_user_prompt(a, retrieved)
+        retrieved = retrieve(qtext, top_k, canonical_only=canonical_only)
+        user_prompt = build_user_prompt(a, retrieved, canonical_only=canonical_only)
         llm_out = call_llm(user_prompt, model, extra_instructions=req.extra_instructions or "")
         results.append(
             {
@@ -1028,7 +1077,12 @@ def map_attributes(req: MapRequest):
                 "recommendation": llm_out,
             }
         )
-    return {"results": results, "model": model, "indexed_mappings": collection.count()}
+    return {
+        "results": results,
+        "model": model,
+        "indexed_mappings": collection.count(),
+        "canonical_only": canonical_only,
+    }
 
 
 # ---------------------------------------------------------------------------

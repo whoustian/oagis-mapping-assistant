@@ -71,10 +71,31 @@ async function refreshHealth() {
     $('#status-text').textContent = canonical > 0
       ? `${mappings} mappings · ${canonical.toLocaleString()} canonical paths`
       : `${mappings} mappings indexed`;
+    updateCanonicalOnlyAvailability(canonical);
   } catch (e) {
     $('#status-pill').classList.add('err');
     $('#status-text').textContent = 'server unreachable';
   }
+}
+
+// Enable/disable the canonical-only toggles based on whether any canonical
+// paths have been seeded into the index. With none, the toggle has no effect
+// and we don't want to let users pick it.
+function updateCanonicalOnlyAvailability(canonicalCount) {
+  const available = (canonicalCount || 0) > 0;
+  [['q-canonical-only', 'q-canonical-only-hint'], ['batch-canonical-only', 'batch-canonical-only-hint']]
+    .forEach(([inputId, hintId]) => {
+      const input = document.getElementById(inputId);
+      const hint = document.getElementById(hintId);
+      if (!input) return;
+      input.disabled = !available;
+      if (!available) {
+        input.checked = false;
+        if (hint) hint.textContent = 'No canonical OAGIS paths seeded yet — run scripts/seed_oagis_xsd.py to enable.';
+      } else if (hint) {
+        hint.textContent = 'Ignore prior team mappings — evaluate solely against the seeded OAGIS XSD.';
+      }
+    });
 }
 
 // ============================================================
@@ -234,6 +255,7 @@ $('#btn-map').addEventListener('click', async () => {
     toast('Attribute name is required.', true);
     return;
   }
+  const canonicalOnly = !!($('#q-canonical-only')?.checked);
   const payload = {
     attributes: [
       {
@@ -245,6 +267,7 @@ $('#btn-map').addEventListener('click', async () => {
     ],
     top_k: parseInt($('#q-k').value, 10) || 6,
     extra_instructions: $('#q-extra').value.trim(),
+    canonical_only: canonicalOnly,
   };
   $('#result-empty').classList.add('hidden');
   $('#result-body').classList.add('hidden');
@@ -258,7 +281,7 @@ $('#btn-map').addEventListener('click', async () => {
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || r.statusText);
-    renderSingleResult(j.results[0]);
+    renderSingleResult(j.results[0], { canonicalOnly: !!j.canonical_only });
   } catch (err) {
     $('#result-body').classList.remove('hidden');
     $('#result-body').innerHTML = `<div class="muted">Error: ${escapeHtml(err.message)}</div>`;
@@ -267,8 +290,9 @@ $('#btn-map').addEventListener('click', async () => {
   }
 });
 
-function renderSingleResult(result) {
+function renderSingleResult(result, opts = {}) {
   const { recommendation, retrieved } = result;
+  const canonicalOnly = !!opts.canonicalOnly;
   const recs = (recommendation.recommendations || []).map(
     (r, i) => `
       <div class="rec">
@@ -311,13 +335,23 @@ function renderSingleResult(result) {
       </div>`;
         })
         .join('')
-    : '<div class="muted small">No prior mappings retrieved (index may be empty).</div>';
+    : (canonicalOnly
+        ? '<div class="muted small">No canonical OAGIS paths retrieved for this attribute — the XSD index may be empty or none are close enough.</div>'
+        : '<div class="muted small">No prior mappings retrieved (index may be empty).</div>');
+
+  const retrievedHeader = canonicalOnly
+    ? 'Retrieved canonical OAGIS paths <span class="muted small">(prior mappings ignored)</span>'
+    : 'Retrieved prior mappings';
+  const modeBanner = canonicalOnly
+    ? '<div class="mode-banner">Canonical-only mode — prior team mappings were hidden from the LLM for this request.</div>'
+    : '';
 
   $('#result-body').innerHTML = `
+    ${modeBanner}
     <div class="rec-list">${recs.join('') || '<div class="muted">No recommendations returned.</div>'}</div>
     ${reviewFlag}
     <div class="retrieved">
-      <h3>Retrieved prior mappings</h3>
+      <h3>${retrievedHeader}</h3>
       ${retrievedHtml}
     </div>
   `;
@@ -474,12 +508,13 @@ $('#btn-batch').addEventListener('click', async () => {
         attributes: attrs,
         top_k: parseInt($('#batch-k').value, 10) || 5,
         extra_instructions: $('#batch-extra').value.trim(),
+        canonical_only: !!($('#batch-canonical-only')?.checked),
       }),
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || r.statusText);
     lastBatchResults = j.results;
-    renderBatch(j.results);
+    renderBatch(j.results, { canonicalOnly: !!j.canonical_only });
   } catch (err) {
     $('#batch-results').innerHTML = `<div class="muted">Error: ${escapeHtml(err.message)}</div>`;
   } finally {
@@ -488,9 +523,10 @@ $('#btn-batch').addEventListener('click', async () => {
   }
 });
 
-function renderBatch(results) {
+function renderBatch(results, opts = {}) {
   const flagged = results.filter((r) => r.recommendation?.needs_human_review).length;
-  $('#batch-summary').textContent = `${results.length} processed · ${flagged} flagged for human review`;
+  const modeSuffix = opts.canonicalOnly ? ' · canonical-only mode (prior mappings ignored)' : '';
+  $('#batch-summary').textContent = `${results.length} processed · ${flagged} flagged for human review${modeSuffix}`;
 
   $('#batch-results').innerHTML = results
     .map((r, idx) => {
