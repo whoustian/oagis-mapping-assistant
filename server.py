@@ -4,7 +4,7 @@ OAGIS Mapping Assistant — RAG over previous attribute mappings.
 Backend: FastAPI
 Vector store: ChromaDB (persistent, on-disk)
 Embeddings: sentence-transformers (all-MiniLM-L6-v2, local)
-LLM: Anthropic Claude via platform credentials
+LLM: OpenAI-compatible chat completions endpoint (configurable via base_url + LLM_API_KEY)
 """
 
 import hashlib
@@ -49,6 +49,7 @@ DATA_DIR.mkdir(exist_ok=True)
 CHROMA_DIR = DATA_DIR / "chroma"
 META_DB = DATA_DIR / "meta.sqlite"
 STATIC_DIR = BASE_DIR / "static"
+TEAM_CONVENTIONS_PATH = BASE_DIR / "team_conventions.md"
 
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 COLLECTION_NAME = "oagis_mappings"
@@ -199,6 +200,10 @@ class MapRequest(BaseModel):
     attributes: list[AttributeQuery]
     top_k: int = 6
     model: Optional[str] = DEFAULT_LLM_MODEL
+    # Ad-hoc instructions injected into the system prompt for this request only.
+    # Useful for one-off hints like "this batch is all from the PLM system" or
+    # "prefer /ItemInstance paths when in doubt".
+    extra_instructions: Optional[str] = ""
 
 
 # ---------------------------------------------------------------------------
@@ -491,11 +496,12 @@ def retrieve(query_text: str, top_k: int) -> list[dict]:
     return out
 
 
-SYSTEM_PROMPT = """You are an expert data modeler specializing in the OAGIS (Open Applications Group Integration Specification) standard. You help a data engineering team map attributes from Technical Data Packages and source systems to the correct location within the OAGIS data model (Nouns, BODs, components, and their nested elements like ItemMaster/Specification/Property, PurchaseOrder/PurchaseOrderLine, etc.).
+BASE_SYSTEM_PROMPT = """You are an expert data modeler specializing in the OAGIS (Open Applications Group Integration Specification) standard. You help a data engineering team map attributes from Technical Data Packages and source systems to the correct location within the OAGIS data model (Nouns, BODs, components, and their nested elements like ItemMaster/Specification/Property, PurchaseOrder/PurchaseOrderLine, etc.).
 
 You will be given:
 1. A new attribute that needs to be mapped.
 2. A set of RETRIEVED prior mappings from the team's internal database — these are the ground truth for how the team has historically mapped similar attributes. They should strongly inform your recommendation.
+3. (Optional) TEAM CONVENTIONS — house rules on path notation, noun selection, and preferred extension patterns. Follow these strictly; they override generic OAGIS defaults.
 
 Your job:
 - Propose 1-3 candidate OAGIS paths, ranked by confidence.
@@ -518,6 +524,25 @@ Return STRICT JSON with this schema and nothing else — no prose outside the JS
   "notes": "string - optional broader observations, e.g. ambiguity, missing context, suggested clarifying questions",
   "needs_human_review": true | false
 }"""
+
+
+def load_system_prompt() -> str:
+    """Build the system prompt from the base template plus any team conventions.
+
+    Re-reads team_conventions.md on every call so edits don't require a restart.
+    """
+    prompt = BASE_SYSTEM_PROMPT
+    try:
+        if TEAM_CONVENTIONS_PATH.exists():
+            conventions = TEAM_CONVENTIONS_PATH.read_text(encoding="utf-8").strip()
+            if conventions:
+                prompt += (
+                    "\n\n---\nTEAM CONVENTIONS (project-wide house rules — follow these strictly):\n\n"
+                    + conventions
+                )
+    except Exception as e:  # pragma: no cover - non-fatal
+        log.warning("Could not load team conventions: %s", e)
+    return prompt
 
 
 def build_user_prompt(a: AttributeQuery, retrieved: list[dict]) -> str:
@@ -548,13 +573,19 @@ RETRIEVED PRIOR MAPPINGS (ranked by similarity, most similar first):
 Recommend the best OAGIS path(s) for this attribute. Respond with the JSON schema only."""
 
 
-def call_llm(user_prompt: str, model: str) -> dict:
+def call_llm(user_prompt: str, model: str, extra_instructions: str = "") -> dict:
+    system_prompt = load_system_prompt()
+    if extra_instructions and extra_instructions.strip():
+        system_prompt += (
+            "\n\n---\nADDITIONAL CONTEXT FOR THIS REQUEST (user-supplied, applies only to this call):\n\n"
+            + extra_instructions.strip()
+        )
     try:
         resp = openai_client.chat.completions.create(
             model=model,
             max_tokens=1500,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
         )
@@ -592,7 +623,7 @@ def map_attributes(req: MapRequest):
         qtext = build_query_text(a)
         retrieved = retrieve(qtext, top_k)
         user_prompt = build_user_prompt(a, retrieved)
-        llm_out = call_llm(user_prompt, model)
+        llm_out = call_llm(user_prompt, model, extra_instructions=req.extra_instructions or "")
         results.append(
             {
                 "input": a.model_dump(),

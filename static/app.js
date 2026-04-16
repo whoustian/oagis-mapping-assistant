@@ -225,6 +225,7 @@ $('#btn-map').addEventListener('click', async () => {
       },
     ],
     top_k: parseInt($('#q-k').value, 10) || 6,
+    extra_instructions: $('#q-extra').value.trim(),
   };
   $('#result-empty').classList.add('hidden');
   $('#result-body').classList.add('hidden');
@@ -329,7 +330,11 @@ $('#btn-batch').addEventListener('click', async () => {
     const r = await fetch(api('/api/map'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ attributes: attrs, top_k: parseInt($('#batch-k').value, 10) || 5 }),
+      body: JSON.stringify({
+        attributes: attrs,
+        top_k: parseInt($('#batch-k').value, 10) || 5,
+        extra_instructions: $('#batch-extra').value.trim(),
+      }),
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || r.statusText);
