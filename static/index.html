@@ -59,6 +59,10 @@
               Description
               <textarea id="q-desc" rows="3" placeholder="Free-text definition, business meaning, sample values…"></textarea>
             </label>
+            <label>
+              Extra instructions for the LLM <span class="muted">(optional)</span>
+              <textarea id="q-extra" rows="2" placeholder="One-off hints for this request only — e.g. 'treat this as an ItemInstance attribute' or 'prefer Specification/Property over custom elements'."></textarea>
+            </label>
             <div class="row-2 align-end">
               <label>
                 Examples to retrieve (K)
@@ -91,6 +95,10 @@
           <textarea id="batch-input" rows="10" placeholder="PartSerialNumber | String(50) | Unique serial assigned per part | Avionics TDP
 ManufactureDate | Date | Date part was built | Avionics TDP
 AssemblyRevCode"></textarea>
+          <label>
+            Extra instructions for the LLM <span class="muted">(optional — applies to every row in this batch)</span>
+            <textarea id="batch-extra" rows="2" placeholder="e.g. 'This batch is all serialized hardware — prefer /ItemInstance paths.'"></textarea>
+          </label>
           <div class="row-2 align-end">
             <label>
               K per attribute
